@@ -181,8 +181,10 @@ def test_component_source_must_be_diffusers_format():
     ],
 )
 def test_invalid_generation_options_are_rejected(kwargs):
+    options = {"prompt": "manga"}
+    options.update(kwargs)
     with pytest.raises(QwenImageGraphError):
-        build_qwen_image_2512_graph(main_model=MAIN_DIFFUSERS, prompt="manga", **kwargs)
+        build_qwen_image_2512_graph(main_model=MAIN_DIFFUSERS, **options)
 
 
 def test_model_records_must_match_expected_architecture_and_type():
