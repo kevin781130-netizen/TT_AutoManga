@@ -26,6 +26,14 @@ interface ArchiveFolderMeta {
   group?: string | null;
 }
 
+interface InvokeAIModelRecord {
+  key: string;
+  name: string;
+  base: string;
+  type: string;
+  format?: string;
+}
+
 /**
  * Detects the natural aspect ratio of an image (data URL or remote URL) and
  * returns a CSS `aspect-ratio` value (e.g. `"768 / 1216"`). While the image
@@ -228,7 +236,16 @@ export function AssetTab() {
   const { t } = useTranslation();
   const [panelStatuses, setPanelStatuses] = useState<Record<string, ImageStatus>>({});
   const [panelErrors, setPanelErrors] = useState<Record<string, string>>({});
-  const [swarmUIConnected, setSwarmUIConnected] = useState<boolean | null>(null);
+  const [invokeAIConnected, setInvokeAIConnected] = useState<boolean | null>(null);
+  const [invokeAIStatus, setInvokeAIStatus] = useState('');
+  const [invokeAIModels, setInvokeAIModels] = useState<InvokeAIModelRecord[]>([]);
+  const [invokeAILoras, setInvokeAILoras] = useState<InvokeAIModelRecord[]>([]);
+  const [invokeAIComponentSources, setInvokeAIComponentSources] = useState<InvokeAIModelRecord[]>([]);
+  const [selectedInvokeAIModelKey, setSelectedInvokeAIModelKey] = useState('');
+  const [selectedComponentSourceKey, setSelectedComponentSourceKey] = useState('');
+  const [selectedInvokeAILoras, setSelectedInvokeAILoras] = useState<Record<string, number>>({});
+  const [invokeAIModelsLoading, setInvokeAIModelsLoading] = useState(false);
+  const [invokeAIModelsError, setInvokeAIModelsError] = useState('');
   const [viewMode, setViewMode] = useState<'generated' | 'archive'>('generated');
   const [archiveImages, setArchiveImages] = useState<ArchiveImageMeta[]>([]);
   const [archiveFolders, setArchiveFolders] = useState<ArchiveFolderMeta[]>([]);
@@ -247,11 +264,15 @@ export function AssetTab() {
   }, [settings.swarmui.currentWidth, settings.swarmui.currentHeight]);
 
   useEffect(() => {
-    checkSwarmUIConnection();
+    void checkInvokeAIConnection();
+    void loadInvokeAIModels();
+  }, []);
+
+  useEffect(() => {
     if (viewMode === 'archive') {
-      loadArchive();
+      void loadArchive();
     }
-  }, [viewMode, currentFolder]);
+  }, [viewMode, currentFolder, folderSortBy]);
 
   useEffect(() => {
     if (!selectedArchiveImage) return;
@@ -370,13 +391,52 @@ export function AssetTab() {
     setSelectedArchiveImage(imageId === selectedArchiveImage ? null : imageId);
   };
 
-  const checkSwarmUIConnection = async () => {
+  const checkInvokeAIConnection = async () => {
     try {
-      const response = await fetch('/api/assets/swarmui/test');
+      const response = await fetch('/api/invokeai/connection');
       const data = await response.json();
-      setSwarmUIConnected(data.connected);
-    } catch {
-      setSwarmUIConnected(false);
+      setInvokeAIConnected(data.connected === true);
+      setInvokeAIStatus(data.version ? `v${data.version}` : (data.status || ''));
+    } catch (error) {
+      setInvokeAIConnected(false);
+      setInvokeAIStatus(String(error));
+    }
+  };
+
+  const loadInvokeAIModels = async () => {
+    setInvokeAIModelsLoading(true);
+    setInvokeAIModelsError('');
+    try {
+      const response = await fetch('/api/invokeai/models');
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || `Model discovery failed (HTTP ${response.status})`);
+      }
+
+      const models: InvokeAIModelRecord[] = Array.isArray(data.models) ? data.models : [];
+      const loras: InvokeAIModelRecord[] = Array.isArray(data.loras) ? data.loras : [];
+      const componentSources: InvokeAIModelRecord[] = Array.isArray(data.component_sources)
+        ? data.component_sources
+        : [];
+
+      setInvokeAIModels(models);
+      setInvokeAILoras(loras);
+      setInvokeAIComponentSources(componentSources);
+      setSelectedInvokeAIModelKey(current =>
+        models.some(model => model.key === current) ? current : (models[0]?.key || '')
+      );
+      setSelectedComponentSourceKey(current =>
+        componentSources.some(model => model.key === current)
+          ? current
+          : (componentSources[0]?.key || '')
+      );
+    } catch (error) {
+      setInvokeAIModels([]);
+      setInvokeAILoras([]);
+      setInvokeAIComponentSources([]);
+      setInvokeAIModelsError(String(error));
+    } finally {
+      setInvokeAIModelsLoading(false);
     }
   };
 
@@ -411,37 +471,85 @@ export function AssetTab() {
     setPanelErrors(prev => ({ ...prev, [panelId]: '' }));
 
     try {
+      if (!currentProject?.id) {
+        throw new Error('Save or open a project before generating with InvokeAI.');
+      }
+      if (invokeAIConnected !== true) {
+        throw new Error(invokeAIStatus || 'InvokeAI is not connected.');
+      }
+
+      const model = invokeAIModels.find(item => item.key === selectedInvokeAIModelKey);
+      if (!model) {
+        throw new Error('Select an installed Qwen Image model first.');
+      }
+      const isDiffusersModel = model.format?.toLowerCase() === 'diffusers';
+      if (!isDiffusersModel && !selectedComponentSourceKey) {
+        throw new Error('This model requires a Diffusers component source. Select one above.');
+      }
+      if (panel.prompt.removeBG) {
+        throw new Error('Background removal is not supported by the current InvokeAI Qwen workflow. Disable it for this panel.');
+      }
+
       const prompt = getPromptForPanel(panel);
       const negPrompt = panel.prompt.negativePrompt || 'low quality, blurry, distorted';
       const seed = panel.prompt.seed;
-      console.log('[Generate] negative_prompt:', negPrompt, '| seed:', seed, '| panel.prompt:', panel.prompt);
-      
-      const removeBG = panel.prompt.removeBG || false;
-      const response = await fetch('/api/assets/swarmui/generate', {
+      const loras = Object.entries(selectedInvokeAILoras).map(([model_key, weight]) => ({
+        model_key,
+        weight,
+      }));
+
+      const response = await fetch('/api/invokeai/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt,
           negative_prompt: negPrompt,
-          seed,
+          seed: Number.isInteger(seed) ? seed : 0,
           panel_id: panelId,
-          project_id: currentProject?.id || 'default',
-          swarmui_address: settings.swarmui.address,
-          remove_background: removeBG,
+          project_id: currentProject.id,
+          model_key: model.key,
+          loras,
+          width: settings.swarmui.currentWidth || 1024,
+          height: settings.swarmui.currentHeight || 1024,
+          steps: settings.swarmui.currentSteps || 40,
+          cfg_scale: settings.swarmui.currentCfgScale ?? 4,
+          component_source_key: isDiffusersModel ? null : selectedComponentSourceKey,
+          idempotency_key: `tt-automanga-${currentProject.id}-${panelId}-${Date.now()}`,
         }),
       });
-
       const data = await response.json();
-
-      if (data.success && data.image) {
-        updatePanelImage(panelId, data.image);
-        setPanelStatuses(prev => ({ ...prev, [panelId]: 'ready' }));
-      } else {
-        setPanelStatuses(prev => ({ ...prev, [panelId]: 'error' }));
-        setPanelErrors(prev => ({ ...prev, [panelId]: data.error || 'Generation failed' }));
+      if (!response.ok) {
+        throw new Error(data.detail || data.error || `InvokeAI enqueue failed (HTTP ${response.status})`);
       }
+      if (!Number.isInteger(data.item_id) || data.item_id <= 0) {
+        throw new Error('InvokeAI did not return a valid queue item ID.');
+      }
+
+      const deadline = Date.now() + 15 * 60 * 1000;
+      while (Date.now() < deadline) {
+        const statusResponse = await fetch(`/api/invokeai/jobs/${data.item_id}`);
+        const job = await statusResponse.json();
+        if (!statusResponse.ok) {
+          throw new Error(job.detail || `InvokeAI status check failed (HTTP ${statusResponse.status})`);
+        }
+
+        if (job.status === 'completed') {
+          if (typeof job.image !== 'string' || !job.image) {
+            throw new Error('InvokeAI completed the job without returning a saved panel image.');
+          }
+          updatePanelImage(panelId, job.image);
+          setPanelStatuses(prev => ({ ...prev, [panelId]: 'ready' }));
+          return;
+        }
+        if (job.status === 'failed' || job.status === 'canceled') {
+          throw new Error(job.error || `InvokeAI job ${job.status}.`);
+        }
+
+        await new Promise(resolve => window.setTimeout(resolve, 1500));
+      }
+      throw new Error('InvokeAI generation timed out after 15 minutes.');
     } catch (error) {
-      console.error('Generation failed:', error);
+      console.error('InvokeAI generation failed:', error);
       setPanelStatuses(prev => ({ ...prev, [panelId]: 'error' }));
       setPanelErrors(prev => ({ ...prev, [panelId]: String(error) }));
     } finally {
@@ -455,6 +563,8 @@ export function AssetTab() {
       await handleGenerate(panel.id);
     }
   };
+
+  const selectedInvokeAIModel = invokeAIModels.find(model => model.key === selectedInvokeAIModelKey);
 
   return (
     <div className="asset-tab">
@@ -503,9 +613,93 @@ export function AssetTab() {
               {t.assets.generateAll || 'Generate All'}
             </button>
           )}
-          <span className={`connection-status ${swarmUIConnected ? 'connected' : 'disconnected'}`}>
+          {viewMode === 'generated' && (
+            <div className="invokeai-controls" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <select
+                aria-label="Qwen Image model"
+                value={selectedInvokeAIModelKey}
+                onChange={e => setSelectedInvokeAIModelKey(e.target.value)}
+                disabled={invokeAIModelsLoading || invokeAIModels.length === 0}
+                title="Installed InvokeAI Qwen Image models"
+                style={{ maxWidth: '260px', padding: '7px 9px', borderRadius: '6px', background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-default)' }}
+              >
+                <option value="">{invokeAIModelsLoading ? 'Loading Qwen models…' : 'Select Qwen Image model'}</option>
+                {invokeAIModels.map(model => (
+                  <option key={model.key} value={model.key}>
+                    {model.name}{model.format ? ` · ${model.format}` : ''}
+                  </option>
+                ))}
+              </select>
+
+              {selectedInvokeAIModel && selectedInvokeAIModel.format?.toLowerCase() !== 'diffusers' && (
+                <select
+                  aria-label="Qwen Image Diffusers component source"
+                  value={selectedComponentSourceKey}
+                  onChange={e => setSelectedComponentSourceKey(e.target.value)}
+                  disabled={invokeAIComponentSources.length === 0}
+                  style={{ maxWidth: '260px', padding: '7px 9px', borderRadius: '6px', background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-default)' }}
+                >
+                  <option value="">Select Diffusers component source</option>
+                  {invokeAIComponentSources.map(model => (
+                    <option key={model.key} value={model.key}>{model.name}</option>
+                  ))}
+                </select>
+              )}
+
+              {invokeAILoras.length > 0 && (
+                <details className="invokeai-lora-picker" style={{ position: 'relative', fontSize: '12px' }}>
+                  <summary style={{ cursor: 'pointer', padding: '7px 9px', border: '1px solid var(--border-default)', borderRadius: '6px' }}>
+                    LoRA ({Object.keys(selectedInvokeAILoras).length})
+                  </summary>
+                  <div style={{ position: 'absolute', top: '100%', right: 0, zIndex: 50, minWidth: '280px', maxHeight: '260px', overflow: 'auto', padding: '10px', background: 'var(--bg-secondary)', border: '1px solid var(--border-default)', borderRadius: '8px', boxShadow: 'var(--shadow-elevated)' }}>
+                    {invokeAILoras.map(lora => {
+                      const selected = selectedInvokeAILoras[lora.key] !== undefined;
+                      return (
+                        <div key={lora.key} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 0' }}>
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={e => setSelectedInvokeAILoras(previous => {
+                              const next = { ...previous };
+                              if (e.target.checked) next[lora.key] = 1;
+                              else delete next[lora.key];
+                              return next;
+                            })}
+                          />
+                          <span style={{ flex: 1 }}>{lora.name}</span>
+                          <input
+                            aria-label={`${lora.name} LoRA weight`}
+                            type="number"
+                            min="0"
+                            max="2"
+                            step="0.05"
+                            value={selected ? selectedInvokeAILoras[lora.key] : 1}
+                            disabled={!selected}
+                            onChange={e => setSelectedInvokeAILoras(previous => ({
+                              ...previous,
+                              [lora.key]: Number(e.target.value),
+                            }))}
+                            style={{ width: '62px' }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </details>
+              )}
+              {invokeAIModelsError && (
+                <span title={invokeAIModelsError} style={{ color: 'var(--error)', fontSize: '12px' }}>
+                  Qwen model discovery failed
+                </span>
+              )}
+            </div>
+          )}
+          <span
+            className={`connection-status ${invokeAIConnected ? 'connected' : 'disconnected'}`}
+            title={invokeAIStatus}
+          >
             <span className="status-dot" />
-            SwarmUI: {swarmUIConnected === null ? t.assets.checking : swarmUIConnected ? t.assets.connected : t.assets.disconnected}
+            InvokeAI: {invokeAIConnected === null ? t.assets.checking : invokeAIConnected ? t.assets.connected : t.assets.disconnected}
           </span>
         </div>
       </div>
