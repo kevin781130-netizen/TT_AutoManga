@@ -83,15 +83,19 @@ async def test_enqueue_graph_uses_batch_envelope_and_returns_item_ids():
         })
 
     client = client_for(handler)
-    result = await client.enqueue_graph({
-        "nodes": {"n1": {"id": "n1", "type": "test"}},
-        "edges": [],
-    })
+    result = await client.enqueue_graph(
+        {
+            "nodes": {"n1": {"id": "n1", "type": "test"}},
+            "edges": [],
+        },
+        destination="tt-automanga:panel:panel1",
+    )
     assert result["item_ids"] == [42]
     assert seen["path"] == "/api/v1/queue/default/enqueue_batch"
     body = __import__("json").loads(seen["body"])
     assert body["batch"]["runs"] == 1
     assert body["batch"]["origin"] == "tt-automanga"
+    assert body["batch"]["destination"] == "tt-automanga:panel:panel1"
     assert body["batch"]["graph"]["nodes"]["n1"]["type"] == "test"
     assert body["prepend"] is False
 

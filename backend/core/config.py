@@ -67,6 +67,13 @@ class SwarmUIConfig(BaseModel):
     promptSuffix: str = ""
 
 
+class InvokeAISettings(BaseModel):
+    address: str = "http://127.0.0.1:9090"
+    queue_id: str = "default"
+    request_timeout: float = 30.0
+    generation_timeout: float = 900.0
+
+
 class DefaultSettings(BaseModel):
     detailLevel: int = 3
     autoSaveInterval: int = 60
@@ -76,6 +83,7 @@ class DefaultSettings(BaseModel):
 class AppSettings(BaseModel):
     api: APIConfig = APIConfig()
     swarmui: SwarmUIConfig = SwarmUIConfig()
+    invokeai: InvokeAISettings = InvokeAISettings()
     defaults: DefaultSettings = DefaultSettings()
     language: str = "en"
 

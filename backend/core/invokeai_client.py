@@ -193,6 +193,7 @@ class InvokeAIClient:
         project_id: str | None = None,
         batch_id: str | None = None,
         idempotency_key: str | None = None,
+        destination: str | None = None,
         queue_id: str = "default",
     ) -> dict[str, Any]:
         """Submit one executable graph to InvokeAI's session queue."""
@@ -215,6 +216,8 @@ class InvokeAIClient:
             batch["project_id"] = project_id
         if idempotency_key:
             batch["idempotency_key"] = idempotency_key
+        if destination:
+            batch["destination"] = destination
 
         payload = await self._request_json(
             "POST",

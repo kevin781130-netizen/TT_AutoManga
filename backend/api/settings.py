@@ -46,9 +46,17 @@ class DefaultSettingsUpdate(BaseModel):
     exportQuality: Optional[str] = None
 
 
+class InvokeAISettingsUpdate(BaseModel):
+    address: Optional[str] = None
+    queue_id: Optional[str] = None
+    request_timeout: Optional[float] = None
+    generation_timeout: Optional[float] = None
+
+
 class FullSettingsUpdate(BaseModel):
     api: Optional[APIConfigUpdate] = None
     swarmui: Optional[SwarmUIConfigUpdate] = None
+    invokeai: Optional[InvokeAISettingsUpdate] = None
     defaults: Optional[DefaultSettingsUpdate] = None
     language: Optional[str] = None
 
@@ -63,6 +71,7 @@ async def get_settings():
     return {
         "api": api,
         "swarmui": config.settings.swarmui.model_dump(),
+        "invokeai": config.settings.invokeai.model_dump(),
         "defaults": config.settings.defaults.model_dump(),
         "language": config.settings.language
     }
@@ -122,6 +131,16 @@ async def update_settings(update: FullSettingsUpdate):
             if update.swarmui.promptSuffix is not None:
                 config.settings.swarmui.promptSuffix = update.swarmui.promptSuffix
         
+        if update.invokeai:
+            if update.invokeai.address is not None:
+                config.settings.invokeai.address = update.invokeai.address
+            if update.invokeai.queue_id is not None:
+                config.settings.invokeai.queue_id = update.invokeai.queue_id
+            if update.invokeai.request_timeout is not None:
+                config.settings.invokeai.request_timeout = update.invokeai.request_timeout
+            if update.invokeai.generation_timeout is not None:
+                config.settings.invokeai.generation_timeout = update.invokeai.generation_timeout
+
         if update.defaults:
             if update.defaults.detailLevel is not None:
                 config.settings.defaults.detailLevel = update.defaults.detailLevel
