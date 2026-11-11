@@ -11,7 +11,9 @@ if str(BACKEND_ROOT.parent) not in sys.path:
 from backend.core.invokeai_qwen2512_graph import (
     DENOISE_NODE_ID,
     LORA_COLLECTION_NODE_ID,
+    METADATA_NODE_ID,
     MODEL_LOADER_NODE_ID,
+    NEGATIVE_ENCODER_NODE_ID,
     PROMPT_NODE_ID,
     QWEN_IMAGE_OUTPUT_NODE_ID,
     QwenImageGraphError,
@@ -69,29 +71,32 @@ def edge_tuple(edge):
     )
 
 
-def test_builds_native_qwen_image_text_to_image_graph():
+def test_builds_native_qwen_image_text_to_image_graph_with_metadata():
     graph = build_qwen_image_2512_graph(
         main_model=MAIN_DIFFUSERS,
         prompt="A manga panel, cinematic lighting",
+        negative_prompt="blurry",
         graph_id="test-graph",
     )
 
     assert graph["id"] == "test-graph"
-    assert set(graph["nodes"]) == {
-        MODEL_LOADER_NODE_ID,
-        PROMPT_NODE_ID,
-        DENOISE_NODE_ID,
-        QWEN_IMAGE_OUTPUT_NODE_ID,
-    }
-    assert graph["nodes"][MODEL_LOADER_NODE_ID]["type"] == "qwen_image_model_loader"
-    assert graph["nodes"][PROMPT_NODE_ID]["type"] == "qwen_image_text_encoder"
-    assert graph["nodes"][DENOISE_NODE_ID]["type"] == "qwen_image_denoise"
-    assert graph["nodes"][QWEN_IMAGE_OUTPUT_NODE_ID]["type"] == "qwen_image_l2i"
-    assert graph["nodes"][PROMPT_NODE_ID]["prompt"] == "A manga panel, cinematic lighting"
+    nodes = graph["nodes"]
+    assert nodes[MODEL_LOADER_NODE_ID]["type"] == "qwen_image_model_loader"
+    assert nodes[PROMPT_NODE_ID]["type"] == "qwen_image_text_encoder"
+    assert nodes[DENOISE_NODE_ID]["type"] == "qwen_image_denoise"
+    assert nodes[QWEN_IMAGE_OUTPUT_NODE_ID]["type"] == "qwen_image_l2i"
+    assert nodes[QWEN_IMAGE_OUTPUT_NODE_ID]["is_intermediate"] is False
+    assert nodes[METADATA_NODE_ID]["generation_mode"] == "qwen_image_txt2img"
+    assert nodes[METADATA_NODE_ID]["positive_prompt"] == "A manga panel, cinematic lighting"
+    assert nodes[METADATA_NODE_ID]["negative_prompt"] == "blurry"
 
 
-def test_base_graph_connects_all_required_qwen_components():
-    graph = build_qwen_image_2512_graph(main_model=MAIN_DIFFUSERS, prompt="manga")
+def test_base_graph_connects_all_required_qwen_components_and_metadata():
+    graph = build_qwen_image_2512_graph(
+        main_model=MAIN_DIFFUSERS,
+        prompt="manga",
+        cfg_scale=1.0,
+    )
     edges = {edge_tuple(edge) for edge in graph["edges"]}
 
     assert edges == {
@@ -100,7 +105,40 @@ def test_base_graph_connects_all_required_qwen_components():
         (PROMPT_NODE_ID, "conditioning", DENOISE_NODE_ID, "positive_conditioning"),
         (DENOISE_NODE_ID, "latents", QWEN_IMAGE_OUTPUT_NODE_ID, "latents"),
         (MODEL_LOADER_NODE_ID, "vae", QWEN_IMAGE_OUTPUT_NODE_ID, "vae"),
+        (METADATA_NODE_ID, "metadata", QWEN_IMAGE_OUTPUT_NODE_ID, "metadata"),
     }
+
+
+def test_cfg_above_one_wires_negative_conditioning():
+    graph = build_qwen_image_2512_graph(
+        main_model=MAIN_DIFFUSERS,
+        prompt="manga",
+        negative_prompt="blurry",
+        cfg_scale=4.0,
+    )
+    nodes = graph["nodes"]
+    edges = {edge_tuple(edge) for edge in graph["edges"]}
+    assert nodes[NEGATIVE_ENCODER_NODE_ID]["prompt"] == "blurry"
+    assert (
+        NEGATIVE_ENCODER_NODE_ID, "conditioning", DENOISE_NODE_ID, "negative_conditioning"
+    ) in edges
+
+
+def test_cfg_at_or_below_one_omits_negative_conditioning_node():
+    graph = build_qwen_image_2512_graph(
+        main_model=MAIN_DIFFUSERS,
+        prompt="manga",
+        negative_prompt="blurry",
+        cfg_scale=1.0,
+    )
+    assert NEGATIVE_ENCODER_NODE_ID not in graph["nodes"]
+    assert not any(edge["destination"]["field"] == "negative_conditioning" for edge in graph["edges"])
+    assert graph["nodes"][METADATA_NODE_ID]["negative_prompt"] == "blurry"
+
+
+def test_empty_negative_prompt_uses_nonempty_encoder_prompt_when_cfg_enabled():
+    graph = build_qwen_image_2512_graph(main_model=MAIN_DIFFUSERS, prompt="manga", cfg_scale=4.0)
+    assert graph["nodes"][NEGATIVE_ENCODER_NODE_ID]["prompt"] == " "
 
 
 def test_graph_supports_multiple_loras_and_routes_both_model_streams():
@@ -124,6 +162,10 @@ def test_graph_supports_multiple_loras_and_routes_both_model_streams():
     assert (MODEL_LOADER_NODE_ID, "qwen_vl_encoder", LORA_COLLECTION_NODE_ID, "qwen_vl_encoder") in edges
     assert (LORA_COLLECTION_NODE_ID, "transformer", DENOISE_NODE_ID, "transformer") in edges
     assert (LORA_COLLECTION_NODE_ID, "qwen_vl_encoder", PROMPT_NODE_ID, "qwen_vl_encoder") in edges
+    assert (
+        LORA_COLLECTION_NODE_ID, "qwen_vl_encoder", NEGATIVE_ENCODER_NODE_ID, "qwen_vl_encoder"
+    ) in edges
+    assert graph["nodes"][METADATA_NODE_ID]["loras"][0]["model"]["key"] == "qwen-lora-key"
 
 
 def test_graph_without_loras_does_not_add_lora_node():
@@ -178,6 +220,7 @@ def test_component_source_must_be_diffusers_format():
         {"cfg_scale": float("nan")},
         {"seed": True},
         {"quantization": "fp8"},
+        {"tiled_decode": "false"},
     ],
 )
 def test_invalid_generation_options_are_rejected(kwargs):
@@ -233,4 +276,5 @@ def test_graph_has_invokeai_node_flags_and_valid_output_node_id():
     graph = build_qwen_image_2512_graph(main_model=MAIN_DIFFUSERS, prompt="manga")
     assert graph["nodes"][MODEL_LOADER_NODE_ID]["is_intermediate"] is True
     assert graph["nodes"][MODEL_LOADER_NODE_ID]["use_cache"] is True
+    assert graph["nodes"][QWEN_IMAGE_OUTPUT_NODE_ID]["is_intermediate"] is False
     assert QWEN_IMAGE_OUTPUT_NODE_ID in graph["nodes"]
