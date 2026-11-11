@@ -19,6 +19,8 @@ MODEL_LOADER_NODE_ID = "qwen_model_loader"
 PROMPT_NODE_ID = "qwen_prompt"
 LORA_COLLECTION_NODE_ID = "qwen_lora_collection"
 DENOISE_NODE_ID = "qwen_denoise"
+NEGATIVE_ENCODER_NODE_ID = "qwen_negative_prompt"
+METADATA_NODE_ID = "qwen_core_metadata"
 
 _NODE_FLAGS = {"is_intermediate": True, "use_cache": True}
 
@@ -74,15 +76,19 @@ def _edge(
 def _validate_generation_options(
     *,
     prompt: str,
+    negative_prompt: str,
     width: int,
     height: int,
     steps: int,
     cfg_scale: float,
     seed: int,
     quantization: str,
+    tiled_decode: bool,
 ) -> None:
     if not isinstance(prompt, str) or not prompt.strip():
         raise QwenImageGraphError("prompt must be a non-empty string")
+    if not isinstance(negative_prompt, str):
+        raise QwenImageGraphError("negative_prompt must be a string")
 
     for name, value in (("width", width), ("height", height)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 16 or value % 16:
@@ -93,18 +99,23 @@ def _validate_generation_options(
 
     if isinstance(cfg_scale, bool) or not isinstance(cfg_scale, (int, float)) or not math.isfinite(cfg_scale):
         raise QwenImageGraphError("cfg_scale must be a finite number")
+    if cfg_scale < 0:
+        raise QwenImageGraphError("cfg_scale cannot be negative")
 
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise QwenImageGraphError("seed must be an integer")
 
     if quantization not in {"none", "int8", "nf4"}:
         raise QwenImageGraphError("quantization must be one of: none, int8, nf4")
+    if not isinstance(tiled_decode, bool):
+        raise QwenImageGraphError("tiled_decode must be a boolean")
 
 
 def build_qwen_image_2512_graph(
     *,
     main_model: Mapping[str, Any],
     prompt: str,
+    negative_prompt: str = "",
     width: int = 1024,
     height: int = 1024,
     steps: int = 40,
@@ -120,22 +131,20 @@ def build_qwen_image_2512_graph(
 ) -> dict[str, Any]:
     """Build a Qwen Image 2512 text-to-image graph using InvokeAI's native nodes.
 
-    main_model, optional component records, and each LoRA's model value are
-    the model records returned by GET /api/v2/models/. Each LoRA entry is
+    main_model, optional component records, and each LoRA model value are the
+    model records returned by GET /api/v2/models/. Each LoRA entry is
     {"model": <model record>, "weight": <float>}.
-
-    A Diffusers-format main model is self-contained for this graph. A non-Diffusers
-    main model must be paired with a Diffusers component_source, or with both a
-    standalone VAE and a standalone Qwen VL encoder.
     """
     _validate_generation_options(
         prompt=prompt,
+        negative_prompt=negative_prompt,
         width=width,
         height=height,
         steps=steps,
         cfg_scale=cfg_scale,
         seed=seed,
         quantization=quantization,
+        tiled_decode=tiled_decode,
     )
 
     main_identifier = _model_identifier(
@@ -147,6 +156,7 @@ def build_qwen_image_2512_graph(
     main_format = main_model.get("format")
     if not isinstance(main_format, str) or not main_format.strip():
         raise QwenImageGraphError("main_model is missing its format metadata")
+    main_format = main_format.lower()
 
     component_identifier = None
     if component_source is not None:
@@ -156,7 +166,7 @@ def build_qwen_image_2512_graph(
             expected_type="main",
             expected_base=QWEN_IMAGE_BASE,
         )
-        if component_source.get("format") != "diffusers":
+        if str(component_source.get("format", "")).lower() != "diffusers":
             raise QwenImageGraphError("component_source must be a Diffusers-format Qwen Image main model")
 
     vae_identifier = None
@@ -197,9 +207,7 @@ def build_qwen_image_2512_graph(
             expected_base=QWEN_IMAGE_BASE,
         )
         if lora_identifier["key"] in seen_lora_keys:
-            raise QwenImageGraphError(
-                f"LoRA {lora_identifier['key']!r} is selected more than once"
-            )
+            raise QwenImageGraphError(f"LoRA {lora_identifier['key']!r} is selected more than once")
         seen_lora_keys.add(lora_identifier["key"])
 
         weight = entry.get("weight", 1.0)
@@ -247,18 +255,44 @@ def build_qwen_image_2512_graph(
         "id": QWEN_IMAGE_OUTPUT_NODE_ID,
         "type": "qwen_image_l2i",
         **_NODE_FLAGS,
-        "tiled": bool(tiled_decode),
+        "is_intermediate": False,
+        "tiled": tiled_decode,
         "tile_size": 0,
     }
+    metadata_node: dict[str, Any] = {
+        "id": METADATA_NODE_ID,
+        "type": "core_metadata",
+        **_NODE_FLAGS,
+        "generation_mode": "qwen_image_txt2img",
+        "positive_prompt": prompt.strip(),
+        "negative_prompt": negative_prompt,
+        "width": width,
+        "height": height,
+        "seed": seed,
+        "cfg_scale": float(cfg_scale),
+        "steps": steps,
+        "model": main_identifier,
+        "loras": [
+            {"model": item["lora"], "weight": item["weight"]}
+            for item in normalized_loras
+        ] or None,
+    }
+    if vae_identifier is not None:
+        metadata_node["vae"] = vae_identifier
 
     nodes: dict[str, dict[str, Any]] = {
         MODEL_LOADER_NODE_ID: model_node,
         PROMPT_NODE_ID: prompt_node,
         DENOISE_NODE_ID: denoise_node,
         QWEN_IMAGE_OUTPUT_NODE_ID: decode_node,
+        METADATA_NODE_ID: metadata_node,
     }
 
-    edges: list[dict[str, dict[str, str]]] = []
+    edges: list[dict[str, dict[str, str]]] = [
+        _edge(DENOISE_NODE_ID, "latents", QWEN_IMAGE_OUTPUT_NODE_ID, "latents"),
+        _edge(MODEL_LOADER_NODE_ID, "vae", QWEN_IMAGE_OUTPUT_NODE_ID, "vae"),
+        _edge(METADATA_NODE_ID, "metadata", QWEN_IMAGE_OUTPUT_NODE_ID, "metadata"),
+    ]
 
     if normalized_loras:
         lora_node = {
@@ -280,10 +314,36 @@ def build_qwen_image_2512_graph(
             _edge(MODEL_LOADER_NODE_ID, "qwen_vl_encoder", PROMPT_NODE_ID, "qwen_vl_encoder"),
         ])
 
-    edges.extend([
-        _edge(PROMPT_NODE_ID, "conditioning", DENOISE_NODE_ID, "positive_conditioning"),
-        _edge(DENOISE_NODE_ID, "latents", QWEN_IMAGE_OUTPUT_NODE_ID, "latents"),
-        _edge(MODEL_LOADER_NODE_ID, "vae", QWEN_IMAGE_OUTPUT_NODE_ID, "vae"),
-    ])
+    if float(cfg_scale) > 1:
+        negative_node = {
+            "id": NEGATIVE_ENCODER_NODE_ID,
+            "type": "qwen_image_text_encoder",
+            **_NODE_FLAGS,
+            "prompt": negative_prompt or " ",
+            "reference_images": [],
+            "quantization": quantization,
+        }
+        nodes[NEGATIVE_ENCODER_NODE_ID] = negative_node
+        negative_encoder_source = (
+            LORA_COLLECTION_NODE_ID if normalized_loras else MODEL_LOADER_NODE_ID
+        )
+        edges.extend([
+            _edge(
+                negative_encoder_source,
+                "qwen_vl_encoder",
+                NEGATIVE_ENCODER_NODE_ID,
+                "qwen_vl_encoder",
+            ),
+            _edge(
+                NEGATIVE_ENCODER_NODE_ID,
+                "conditioning",
+                DENOISE_NODE_ID,
+                "negative_conditioning",
+            ),
+        ])
+
+    edges.append(
+        _edge(PROMPT_NODE_ID, "conditioning", DENOISE_NODE_ID, "positive_conditioning")
+    )
 
     return {"id": graph_id, "nodes": nodes, "edges": edges}
