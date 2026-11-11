@@ -2,7 +2,9 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from pydantic import BaseModel
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +70,27 @@ class SwarmUIConfig(BaseModel):
 
 
 class InvokeAISettings(BaseModel):
-    address: str = "http://127.0.0.1:9090"
-    queue_id: str = "default"
-    request_timeout: float = 30.0
-    generation_timeout: float = 900.0
+    address: str = Field(default="http://127.0.0.1:9090", min_length=1, max_length=2048)
+    queue_id: str = Field(default="default", min_length=1, max_length=255)
+    request_timeout: float = Field(default=30.0, gt=0, le=3600, allow_inf_nan=False)
+    generation_timeout: float = Field(default=900.0, gt=0, le=86400, allow_inf_nan=False)
+
+    @field_validator("address")
+    @classmethod
+    def validate_address(cls, value: str) -> str:
+        value = value.strip()
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("InvokeAI address must be an absolute HTTP(S) origin without credentials or path")
+        return value.rstrip("/")
 
 
 class DefaultSettings(BaseModel):

@@ -177,7 +177,11 @@ async def _persist_completed_job(
         project = _validate_project_panel(project_id, panel_id)
 
         existing = _find_job_asset(item_id)
-        if existing is not None and existing.get("project_id") == project_id:
+        if (
+            existing is not None
+            and existing.get("project_id") == project_id
+            and existing.get("panel_id") == panel_id
+        ):
             asset_id = existing.get("asset_id")
             if isinstance(asset_id, str) and asset_store.path_for(asset_id) is not None:
                 image_url = asset_store.url_for(asset_id)

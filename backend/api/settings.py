@@ -47,10 +47,10 @@ class DefaultSettingsUpdate(BaseModel):
 
 
 class InvokeAISettingsUpdate(BaseModel):
-    address: Optional[str] = None
-    queue_id: Optional[str] = None
-    request_timeout: Optional[float] = None
-    generation_timeout: Optional[float] = None
+    address: Optional[str] = Field(default=None, min_length=1, max_length=2048)
+    queue_id: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    request_timeout: Optional[float] = Field(default=None, gt=0, le=3600, allow_inf_nan=False)
+    generation_timeout: Optional[float] = Field(default=None, gt=0, le=86400, allow_inf_nan=False)
 
 
 class FullSettingsUpdate(BaseModel):
@@ -132,14 +132,9 @@ async def update_settings(update: FullSettingsUpdate):
                 config.settings.swarmui.promptSuffix = update.swarmui.promptSuffix
         
         if update.invokeai:
-            if update.invokeai.address is not None:
-                config.settings.invokeai.address = update.invokeai.address
-            if update.invokeai.queue_id is not None:
-                config.settings.invokeai.queue_id = update.invokeai.queue_id
-            if update.invokeai.request_timeout is not None:
-                config.settings.invokeai.request_timeout = update.invokeai.request_timeout
-            if update.invokeai.generation_timeout is not None:
-                config.settings.invokeai.generation_timeout = update.invokeai.generation_timeout
+            invokeai_values = config.settings.invokeai.model_dump()
+            invokeai_values.update(update.invokeai.model_dump(exclude_none=True))
+            config.settings.invokeai = config.InvokeAISettings.model_validate(invokeai_values)
 
         if update.defaults:
             if update.defaults.detailLevel is not None:
