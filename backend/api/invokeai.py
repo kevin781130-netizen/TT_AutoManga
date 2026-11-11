@@ -45,6 +45,7 @@ class InvokeAIGenerateRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=128)
     panel_id: str = Field(min_length=1, max_length=255)
     prompt: str = Field(min_length=1, max_length=20000)
+    negative_prompt: str = Field(default="", max_length=20000)
     model_key: str = Field(min_length=1, max_length=255)
     loras: list[InvokeAILoRASelection] = Field(default_factory=list)
     width: int = Field(default=1024, gt=0, multiple_of=16, le=4096)
@@ -295,6 +296,7 @@ async def enqueue_invokeai_generation(req: InvokeAIGenerateRequest):
         graph = build_qwen_image_2512_graph(
             main_model=main_model,
             prompt=req.prompt,
+            negative_prompt=req.negative_prompt,
             width=req.width,
             height=req.height,
             steps=req.steps,
