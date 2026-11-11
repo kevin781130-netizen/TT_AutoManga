@@ -154,6 +154,7 @@ def test_generate_enqueues_native_graph_with_panel_destination(monkeypatch, tmp_
             "project_id": "project1",
             "panel_id": "panel1",
             "prompt": "A cinematic manga panel",
+            "negative_prompt": "blurry, malformed hands",
             "model_key": "qwen-main",
             "loras": [{"model_key": "qwen-lora", "weight": 0.75}],
             "width": 1024,
@@ -173,6 +174,8 @@ def test_generate_enqueues_native_graph_with_panel_destination(monkeypatch, tmp_
     assert fake_client.enqueued["destination"] == "tt-automanga:panel:panel1"
     graph = fake_client.enqueued["graph"]
     assert graph["nodes"]["qwen_lora_collection"]["type"] == "qwen_image_lora_collection_loader"
+    assert graph["nodes"]["qwen_core_metadata"]["negative_prompt"] == "blurry, malformed hands"
+    assert graph["nodes"]["qwen_negative_prompt"]["prompt"] == "blurry, malformed hands"
 
 
 def test_completed_job_persists_panel_asset_once(monkeypatch, tmp_path):
