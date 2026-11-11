@@ -150,6 +150,8 @@ async def update_settings(update: FullSettingsUpdate):
         config.save_settings(config.settings)
         
         return {"success": True}
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
